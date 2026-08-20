@@ -1,0 +1,40 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+!backend/testdata/**/*.pem
+!backend/testdata/**/*.key
+
+# Runtime state
+/data/
+*.db
+*.db-wal
+*.db-shm
+/recordings/
+
+# Go
+backend/bin/
+backend/coverage.out
+backend/coverage.html
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+npm-debug.log*
+pnpm-debug.log*
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example

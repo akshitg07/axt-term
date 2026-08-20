@@ -1,0 +1,45 @@
+# Everything that must not enter the build context. A smaller context is faster,
+# and more importantly it means a stray .env or key file cannot end up in an image
+# layer.
+
+.git
+.github
+.gitignore
+.editorconfig
+
+# Secrets, unconditionally.
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+!backend/testdata/**
+
+# Runtime state.
+data/
+recordings/
+*.db
+*.db-wal
+*.db-shm
+
+# Build output; the image builds its own.
+backend/bin/
+backend/coverage.out
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+
+# The placeholder SPA shell is replaced by the real build inside the image.
+backend/internal/web/dist/
+
+docs/
+*.md
+!README.md
+
+.idea/
+.vscode/
+.DS_Store

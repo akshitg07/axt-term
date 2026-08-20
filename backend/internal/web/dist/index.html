@@ -1,0 +1,41 @@
+<!doctype html>
+<!--
+  Placeholder shell.
+
+  `make web-build` replaces this directory with the real Vite output. It exists so
+  the //go:embed directive in web.go stays valid and the backend compiles and runs
+  before the frontend has ever been built.
+-->
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AXT-Term</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: #0b0d0f;
+    color: #e6edf3;
+    font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  main { max-width: 44rem; padding: 2rem; }
+  h1 { font-size: 1.25rem; letter-spacing: 0.02em; margin: 0 0 0.5rem; }
+  .cursor { color: #22d3ee; }
+  p { color: #9aa7b2; }
+  code { color: #e6edf3; background: #14181c; padding: 0.1rem 0.35rem; border-radius: 3px; }
+  ul { color: #9aa7b2; padding-left: 1.25rem; }
+</style>
+<main>
+  <h1>AXT&#8239;<span class="cursor">&#9608;</span></h1>
+  <p>
+    The backend is running, but no frontend build is embedded in this binary.
+    The API is fully available at <code>/api/v1</code>.
+  </p>
+  <ul>
+    <li><code>make web-build</code> builds the SPA into this directory</li>
+    <li><code>make build</code> then produces a binary containing it</li>
+    <li><code>curl -s localhost:8080/healthz</code> checks the server directly</li>
+  </ul>
+</main>

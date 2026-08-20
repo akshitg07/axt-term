@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Four themes. Colours are declared once as semantic tokens and never as raw hex
+  in a component, so adding a theme is a block in this file rather than an audit
+  of every file.
+
+  Dark is the default. Midnight is for OLED panels where near-black saves power
+  and looks better. High Contrast meets WCAG AAA and, importantly, does not rely
+  on hue to convey anything -- red/green colour blindness is common in this
+  audience, so status is always shape plus colour.
+*/
+
+:root,
+[data-theme='dark'] {
+  --surface-0: #0b0d0f;
+  --surface-1: #111417;
+  --surface-2: #171b1f;
+  --surface-3: #1e2328;
+  --border-subtle: #23282e;
+  --border-strong: #333b43;
+  --text-primary: #e6edf3;
+  --text-secondary: #9aa7b2;
+  --text-muted: #6b7681;
+  --accent: #22d3ee;
+  --accent-muted: #155e6b;
+  --accent-fg: #06232a;
+  --success: #3fb950;
+  --warning: #d29922;
+  --danger: #f85149;
+  --info: #58a6ff;
+  --shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  --surface-0: #f6f8fa;
+  --surface-1: #ffffff;
+  --surface-2: #f0f3f6;
+  --surface-3: #ffffff;
+  --border-subtle: #d8dee4;
+  --border-strong: #b6bfc9;
+  --text-primary: #1f2328;
+  --text-secondary: #57606a;
+  --text-muted: #818b98;
+  --accent: #0b7285;
+  --accent-muted: #a5e8f2;
+  --accent-fg: #ffffff;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --danger: #cf222e;
+  --info: #0969da;
+  --shadow: 0 8px 24px rgb(31 35 40 / 12%);
+  color-scheme: light;
+}
+
+[data-theme='midnight'] {
+  --surface-0: #000000;
+  --surface-1: #07090b;
+  --surface-2: #0d1013;
+  --surface-3: #14181c;
+  --border-subtle: #161a1f;
+  --border-strong: #262d34;
+  --text-primary: #dfe7ee;
+  --text-secondary: #8b98a4;
+  --text-muted: #5d6873;
+  --accent: #2dd4bf;
+  --accent-muted: #115e59;
+  --accent-fg: #04201d;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --info: #60a5fa;
+  --shadow: 0 8px 24px rgb(0 0 0 / 70%);
+  color-scheme: dark;
+}
+
+[data-theme='contrast'] {
+  --surface-0: #000000;
+  --surface-1: #000000;
+  --surface-2: #0a0a0a;
+  --surface-3: #141414;
+  --border-subtle: #808080;
+  --border-strong: #ffffff;
+  --text-primary: #ffffff;
+  --text-secondary: #e0e0e0;
+  --text-muted: #c0c0c0;
+  --accent: #00e5ff;
+  --accent-muted: #005f6b;
+  --accent-fg: #000000;
+  --success: #00e676;
+  --warning: #ffd600;
+  --danger: #ff5252;
+  --info: #40c4ff;
+  --shadow: none;
+  color-scheme: dark;
+}
+
+/* Borders are thicker in high contrast, so structure is visible without relying
+   on subtle value differences. */
+[data-theme='contrast'] * {
+  border-color: var(--border-subtle);
+}
+[data-theme='contrast'] :focus-visible {
+  outline-width: 3px;
+}
+
+/* ---------------------------------------------------------------- fonts --- */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/InterVariable.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/fonts/JetBrainsMono.woff2') format('woff2');
+}
+
+/* ----------------------------------------------------------------- base --- */
+
+@layer base {
+  * {
+    border-color: var(--border-subtle);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--surface-0);
+    color: var(--text-primary);
+    font-family: theme('fontFamily.sans');
+    font-size: 13px;
+    line-height: 19px;
+    -webkit-font-smoothing: antialiased;
+    /* The workspace itself never scrolls; panels scroll inside it. */
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  /* Focus is never removed, only styled. Keyboard-first is a stated goal, and an
+     invisible focus ring makes it unusable. */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background: var(--accent-muted);
+    color: var(--text-primary);
+  }
+
+  /* Scrollbars sized for a dense UI rather than a document. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+    background-clip: content-box;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+/* ------------------------------------------------------------ components --- */
+
+@layer components {
+  .panel {
+    @apply bg-surface-1 border border-border-subtle rounded-md;
+  }
+
+  .field {
+    @apply w-full bg-surface-2 border border-border-subtle rounded px-2 py-1.5 text-base
+           text-text-primary placeholder:text-text-muted
+           focus-visible:border-accent transition-colors;
+  }
+
+  .field-invalid {
+    @apply border-state-danger;
+  }
+
+  .label {
+    @apply block text-sm text-text-secondary mb-1;
+  }
+
+  .hint {
+    @apply text-sm text-text-muted mt-1;
+  }
+
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[18px] h-[18px] px-1
+           rounded border border-border-subtle bg-surface-2
+           font-mono text-xs text-text-secondary;
+  }
+
+  .row-hover {
+    @apply hover:bg-surface-2 transition-colors;
+  }
+
+  /* A subtle inset used to separate the session area from the chrome around it. */
+  .inset-shadow {
+    box-shadow: inset 0 1px 0 var(--border-subtle);
+  }
+}
+
+/* --------------------------------------------------------------- xterm --- */
+
+.xterm {
+  padding: 6px 8px;
+  height: 100%;
+}
+
+.xterm-viewport {
+  /* xterm draws its own background; letting it inherit avoids a flash of the
+     wrong colour when a theme changes. */
+  background-color: transparent !important;
+}
+
+.xterm .xterm-screen {
+  /* Prevents a sub-pixel gap that shows the page background between rows on
+     fractional device pixel ratios. */
+  outline: none;
+}
+
+/* --------------------------------------------------- reduced motion --- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

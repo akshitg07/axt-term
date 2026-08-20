@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="AXT-Term — your remote infrastructure, one terminal away." />
+    <!--
+      Fonts are self-hosted in public/fonts. No CDN reference anywhere: the CSP
+      forbids external hosts, and air-gapped operation is a requirement rather
+      than a nice-to-have.
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>AXT-Term</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      AXT-Term needs JavaScript: the terminal is a real interactive shell rendered
+      in the browser, which cannot be done without it.
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

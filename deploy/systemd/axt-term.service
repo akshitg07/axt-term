@@ -1,0 +1,65 @@
+[Unit]
+Description=AXT-Term — browser-based remote infrastructure workstation
+Documentation=https://github.com/axt-term/axt-term
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=axt
+Group=axt
+
+# Configuration lives in an environment file so secrets are not in the unit, which
+# is world-readable.
+EnvironmentFile=/etc/axt-term/axt-term.env
+ExecStart=/usr/local/bin/axt-term
+
+# The server handles SIGTERM and shuts down in a defined order: notify clients,
+# close sessions, close SSH transports, mark transfers retryable, checkpoint the
+# database. Give it room to finish rather than killing it mid-sequence.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5s
+
+# --- hardening ---------------------------------------------------------------
+# The process needs to make outbound TCP connections and write one directory. It
+# needs nothing else, so nothing else is permitted.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+# The only writable path.
+ReadWritePaths=/var/lib/axt-term
+
+# AF_UNIX is needed for an optionally mounted SSH agent socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# A credential store should not end up in a core dump.
+LimitCORE=0
+
+# One file descriptor per SSH channel, WebSocket, and transfer; the default 1024
+# is low for an estate of a few hundred hosts.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

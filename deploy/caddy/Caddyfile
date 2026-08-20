@@ -1,0 +1,75 @@
+# Caddy terminates TLS in front of AXT-Term.
+#
+# Caddy is used rather than nginx for one reason that matters here: on a LAN with
+# an internal hostname, `tls internal` issues a certificate from Caddy's own CA
+# with no configuration and no external dependency. That keeps the requirement
+# "works air-gapped" and the requirement "cookies can be Secure" satisfiable at
+# the same time.
+
+{
+	# No outbound ACME attempt by default: an air-gapped instance must start
+	# cleanly. Set AXT_ACME_EMAIL and swap `tls internal` below for a public name.
+	admin off
+	auto_https disable_redirects
+}
+
+{$AXT_DOMAIN:axt-term.local} {
+	# Caddy's internal CA. Trust deploy/caddy/root.crt on client machines, or
+	# replace this line with `tls /path/cert.pem /path/key.pem` for your own
+	# certificate, or delete it entirely for a public domain with ACME.
+	tls internal
+
+	encode zstd gzip
+
+	# WebSocket upgrades must pass through untouched, and they must not be subject
+	# to a response timeout: a terminal session is a single request that lasts
+	# hours.
+	@websockets {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+
+	handle @websockets {
+		reverse_proxy axt-term:8080 {
+			# No flush_interval limit and no read timeout: buffering a terminal
+			# stream would make keystroke echo feel broken.
+			flush_interval -1
+		}
+	}
+
+	# Streamed downloads and uploads also need unbuffered proxying.
+	handle /api/v1/hosts/*/fs/* {
+		reverse_proxy axt-term:8080 {
+			flush_interval -1
+			request_body {
+				max_size 0
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy axt-term:8080 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
+	}
+
+	# HSTS is set here as well as by the application, so it is present even on a
+	# response the application did not generate.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}
+
+# Plain HTTP redirects, so a bookmarked http:// link still lands somewhere useful.
+http://{$AXT_DOMAIN:axt-term.local} {
+	redir https://{host}{uri} permanent
+}

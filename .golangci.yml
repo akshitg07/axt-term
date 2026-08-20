@@ -1,0 +1,71 @@
+# golangci-lint configuration (v1 format).
+#
+# Kept modest deliberately: a linter set that produces noise gets disabled, and a
+# disabled linter catches nothing. These are the checks that have caught real
+# bugs in code shaped like this.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck        # unchecked errors, especially on Close and Write
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosimple
+    - bodyclose       # leaked HTTP response bodies
+    - rowserrcheck    # missed sql.Rows.Err
+    - sqlclosecheck   # leaked sql.Rows and sql.Stmt
+    - noctx           # HTTP requests without a context
+    - errorlint       # wrapping and comparison mistakes
+    - contextcheck
+    - misspell
+    - unconvert
+    - wastedassign
+    - nilerr
+    - copyloopvar
+    - gosec
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    exclude-functions:
+      # Writing to an http.ResponseWriter after headers are sent cannot be
+      # handled meaningfully; the access log records the truncation.
+      - (net/http.ResponseWriter).Write
+  govet:
+    enable:
+      - shadow
+  gosec:
+    excludes:
+      # G104 duplicates errcheck.
+      - G104
+  misspell:
+    locale: UK
+    ignore-words:
+      - serialize
+      - serialization
+      - authorize
+      - authorization
+      - normalize
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Table-driven tests legitimately ignore errors from helpers, and hardcoded
+    # test credentials are not findings.
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+        - contextcheck
+    # The docs generator writes to stdout; a failed write there is not
+    # actionable.
+    - path: cmd/axt-docgen/
+      linters:
+        - errcheck

@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          # go.sum does not exist until the first third-party dependency lands
+          # in M2; hashing go.mod keeps the cache key valid either way.
+          cache-dependency-path: backend/go.mod
+
+      - name: Check formatting
+        run: |
+          out="$(cd backend && gofmt -l -s .)"
+          if [ -n "$out" ]; then
+            echo "::error::these files are not gofmt -s clean:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Vet
+        run: cd backend && go vet ./...
+
+      - name: Verify go.mod is tidy
+        run: |
+          cd backend && go mod tidy
+          git diff --exit-code -- go.mod \
+            || { echo "::error::go.mod is not tidy"; exit 1; }
+
+      - name: Test
+        run: cd backend && go test -count=1 ./...
+
+      - name: Test with race detector
+        run: cd backend && go test -race -count=1 ./...
+
+      - name: Verify generated configuration reference is current
+        run: |
+          make docs-config
+          git diff --exit-code -- docs/configuration.md \
+            || { echo "::error::docs/configuration.md is stale; run 'make docs-config' and commit"; exit 1; }
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61
+          working-directory: backend
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect frontend
+        id: detect
+        run: |
+          if [ -f frontend/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Frontend is scaffolded in M7; nothing to build yet."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.present == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        if: steps.detect.outputs.present == 'true'
+        run: cd frontend && npm ci
+
+      - name: Typecheck
+        if: steps.detect.outputs.present == 'true'
+        run: cd frontend && npm run typecheck
+
+      - name: Lint
+        if: steps.detect.outputs.present == 'true'
+        run: cd frontend && npm run lint
+
+      - name: Test
+        if: steps.detect.outputs.present == 'true'
+        run: cd frontend && npm run test -- --run
+
+      - name: Build
+        if: steps.detect.outputs.present == 'true'
+        run: cd frontend && npm run build
