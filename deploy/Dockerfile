@@ -8,16 +8,20 @@
 # --------------------------------------------------------------- frontend ----
 FROM node:22-alpine AS frontend
 
-WORKDIR /build
+# vite.config.ts writes its build to ../backend/internal/web/dist, a path relative
+# to the frontend directory, so this stage mirrors the repo layout rather than
+# flattening it. Build somewhere else and the output lands outside the stage's
+# working tree with nothing for the backend stage to copy.
+WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 # `npm ci` when a lockfile exists so builds are reproducible; fall back to
 # `install` so a fresh checkout without one still builds.
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 COPY frontend/ ./
-# Vite writes into the Go module's embed directory, so the path here must match
-# vite.config.ts.
-RUN npm run build && ls -la dist || true
+# No `|| true` here: a swallowed build failure turns into a confusing "not found"
+# on the COPY in the next stage instead of the actual compiler error.
+RUN npm run build
 
 # ---------------------------------------------------------------- backend ----
 FROM golang:1.23-alpine AS backend
@@ -33,8 +37,10 @@ COPY backend/go.mod backend/go.sum* ./
 RUN go mod download
 
 COPY backend/ ./
-# The SPA is copied over the placeholder committed in the repo.
-COPY --from=frontend /build/dist ./internal/web/dist
+# .dockerignore keeps the committed placeholder dist/ out of the build context, so
+# this COPY is what satisfies the `//go:embed all:dist` directive -- without it the
+# backend does not compile at all.
+COPY --from=frontend /src/backend/internal/web/dist ./internal/web/dist
 
 ARG VERSION=dev
 ARG COMMIT=unknown
