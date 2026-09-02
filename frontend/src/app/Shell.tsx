@@ -21,7 +21,7 @@ import clsx from 'clsx'
 
 import type { MeResponse } from '@/lib/types'
 import { useActiveTab, useUI, type PanelId, type Tab } from '@/lib/store'
-import { useHosts, useKeybindings, useOpenSession, useTransfers } from '@/lib/hooks'
+import { isDesktopProtocol, useHosts, useKeybindings, useOpenSession, useTransfers } from '@/lib/hooks'
 import { Badge, ComingSoon, EmptyState, IconButton, Kbd, StatusDot } from '@/components/ui'
 import { Wordmark } from '@/components/Wordmark'
 import { Sidebar } from '@/features/hosts/Sidebar'
@@ -29,6 +29,7 @@ import { HostDialog } from '@/features/hosts/HostDialog'
 import { HostKeyDialog } from '@/features/hosts/HostKeyDialog'
 import { CommandPalette } from '@/features/palette/CommandPalette'
 import { TerminalPane } from '@/features/terminal/TerminalPane'
+import { RDPPane } from '@/features/rdp/RDPPane'
 import { CredentialsPanel } from '@/features/credentials/CredentialsPanel'
 import { SnippetsPanel } from '@/features/snippets/SnippetsPanel'
 import { SettingsPanel } from '@/features/settings/SettingsPanel'
@@ -95,6 +96,10 @@ export function Shell({ me }: { me: MeResponse }) {
             <Sidebar
               onNewHost={() => {
                 setEditingHostId(null)
+                setHostDialogOpen(true)
+              }}
+              onEditHost={(hostId) => {
+                setEditingHostId(hostId)
                 setHostDialogOpen(true)
               }}
               onOpenCredentials={() => setOverlay('credentials')}
@@ -397,6 +402,7 @@ function SessionArea() {
   const tab = useActiveTab()
   const setPanel = useUI((s) => s.setPanel)
   const openPalette = useUI((s) => s.openPalette)
+  const hostsQuery = useHosts()
 
   if (!tab) {
     return (
@@ -416,6 +422,30 @@ function SessionArea() {
             </button>
           }
         />
+      </div>
+    )
+  }
+
+  const desktop = isDesktopProtocol(tab.protocol)
+
+  // A desktop has no per-host panels: Files, System, and Processes all work over
+  // the SSH connection a Windows RDP host does not have. Showing them greyed out
+  // would only invite the question of why they never work.
+  if (desktop) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="min-h-0 flex-1">
+          {tab.sessionId ? (
+            <RDPPane tab={tab} host={hostsQuery.data?.find((h) => h.id === tab.hostId)} />
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <EmptyState
+                title={tab.state === 'failed' ? 'Connection failed' : 'Connecting…'}
+                message={tab.exitReason}
+              />
+            </div>
+          )}
+        </div>
       </div>
     )
   }

@@ -6,6 +6,10 @@
 *.pem
 !backend/testdata/**/*.pem
 !backend/testdata/**/*.key
+# The master key file has no extension, so *.key does not match it. Committing it
+# would publish the one secret that decrypts every stored credential.
+secrets/
+!secrets/.gitkeep
 
 # Runtime state
 /data/

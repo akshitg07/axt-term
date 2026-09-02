@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/axt-term/axt-term/backend/internal/httpx"
+	"github.com/axt-term/axt-term/backend/internal/rbac"
+	"github.com/axt-term/axt-term/backend/internal/rdp"
 	"github.com/axt-term/axt-term/backend/internal/sshx"
 	"github.com/axt-term/axt-term/backend/internal/store"
 	"github.com/axt-term/axt-term/backend/internal/terminal"
@@ -91,6 +93,12 @@ type createSessionRequest struct {
 	Rows    int    `json:"rows"`
 	Record  bool   `json:"record,omitempty"`
 	Command string `json:"command,omitempty"`
+
+	// Desktop geometry, in pixels. A PTY measures itself in cells and a desktop in
+	// pixels, so the two cannot share one pair of fields without one of them lying.
+	Width  int `json:"width,omitempty"`
+	Height int `json:"height,omitempty"`
+	DPI    int `json:"dpi,omitempty"`
 }
 
 type hostKeyPrompt struct {
@@ -104,12 +112,15 @@ type hostKeyPrompt struct {
 }
 
 type createSessionResponse struct {
-	SessionID string             `json:"session_id,omitempty"`
-	State     string             `json:"state"`
-	Host      *store.Host        `json:"host,omitempty"`
-	Session   *terminal.Info     `json:"session,omitempty"`
-	HostKey   *hostKeyPrompt     `json:"pending_hostkey,omitempty"`
-	Banners   []string           `json:"banners,omitempty"`
+	SessionID string              `json:"session_id,omitempty"`
+	State     string              `json:"state"`
+	Host      *store.Host         `json:"host,omitempty"`
+	// Session is a terminal.Info or an rdp.Info. Both marshal to the shape the
+	// client's SessionInfo type describes, differing only in whether they carry
+	// cells or pixels.
+	Session   any                 `json:"session,omitempty"`
+	HostKey   *hostKeyPrompt      `json:"pending_hostkey,omitempty"`
+	Banners   []string            `json:"banners,omitempty"`
 	Error     *sessionErrorDetail `json:"error,omitempty"`
 }
 
@@ -126,17 +137,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	p := s.principal(r)
 
-	if req.Cols == 0 {
-		req.Cols = 80
-	}
-	if req.Rows == 0 {
-		req.Rows = 24
-	}
-	if err := validate.TerminalSize(req.Cols, req.Rows); err != nil {
-		httpx.ValidationFailed(w, r, map[string]any{"cols": err.Error()})
-		return
-	}
-
 	host, err := s.store.HostByID(r.Context(), req.HostID)
 	if err != nil {
 		s.fail(w, r, err)
@@ -146,14 +146,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		httpx.NotImplemented(w, r, "sessions over "+string(host.Protocol), "phase-4")
 		return
 	}
-	if host.Protocol == store.ProtocolRDP {
-		if !s.cfg.RDP.Enabled() {
-			httpx.WriteErrorDetails(w, r, http.StatusNotImplemented, httpx.CodeNotImplemented,
-				"RDP is unavailable because no guacd address is configured",
-				map[string]any{"setting": "AXT_GUACD_ADDR"})
-			return
-		}
-		httpx.NotImplemented(w, r, "RDP sessions", "phase-2")
+	if host.Protocol.Desktop() {
+		s.createDesktopSession(w, r, host, req)
+		return
+	}
+
+	if req.Cols == 0 {
+		req.Cols = 80
+	}
+	if req.Rows == 0 {
+		req.Rows = 24
+	}
+	if err := validate.TerminalSize(req.Cols, req.Rows); err != nil {
+		httpx.ValidationFailed(w, r, map[string]any{"cols": err.Error()})
 		return
 	}
 	if req.Record && !p.Has("session.record") {
@@ -191,6 +196,86 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Host:      host,
 		Session:   &info,
 	})
+}
+
+// createDesktopSession opens an RDP or VNC session through the guacd bridge.
+//
+// The permission check is inline rather than on the route because one route serves
+// both kinds of session and its declared permission is session.ssh -- the same
+// reason the recording check below it is inline. Somebody granted shells is not
+// automatically granted desktops: an RDP session carries clipboard and optional
+// drive redirection, which is a wider door than a PTY.
+func (s *Server) createDesktopSession(w http.ResponseWriter, r *http.Request, host *store.Host, req createSessionRequest) {
+	p := s.principal(r)
+
+	if !p.Has(rbac.SessionRDP) {
+		httpx.Forbidden(w, r, "opening a remote desktop requires the "+rbac.SessionRDP+" permission")
+		return
+	}
+	if !s.cfg.RDP.Enabled() {
+		httpx.WriteErrorDetails(w, r, http.StatusNotImplemented, httpx.CodeNotImplemented,
+			"remote desktops are unavailable because no guacd address is configured",
+			map[string]any{"setting": "AXT_GUACD_ADDR"})
+		return
+	}
+
+	ctx, cancel := remoteCtx(r)
+	defer cancel()
+
+	session, err := s.desktops.Create(ctx, rdp.CreateRequest{
+		UserID:   p.UserID,
+		Username: p.Username,
+		Host:     host,
+		Display:  rdp.Display{Width: req.Width, Height: req.Height, DPI: req.DPI},
+		ClientIP: httpx.ClientIP(r.Context()),
+	})
+	if err != nil {
+		s.respondDesktopError(w, r, host, err)
+		return
+	}
+
+	info := session.Info()
+	s.audit.HostAction(r, host, ActionSessionOpen, host.Address(), map[string]any{
+		"session_id": session.ID,
+		"protocol":   string(host.Protocol),
+		"clipboard":  host.RDPOptions.EnableClipboard,
+		"drive":      host.RDPOptions.EnableDrive,
+	})
+
+	httpx.WriteJSON(w, http.StatusCreated, createSessionResponse{
+		SessionID: session.ID,
+		State:     string(info.State),
+		Host:      host,
+		Session:   &info,
+	})
+}
+
+// respondDesktopError records a failed desktop connection and reports it.
+//
+// A rejected password and an unreachable gateway are both "it did not connect" to
+// the user, and telling them apart is the difference between re-checking a
+// credential and telling an operator guacd is down.
+func (s *Server) respondDesktopError(w http.ResponseWriter, r *http.Request, host *store.Host, err error) {
+	severity := store.SeverityWarning
+	detail := map[string]any{"error": err.Error()}
+
+	var remote *rdp.RemoteError
+	if errors.As(err, &remote) {
+		detail["guacamole_status"] = remote.Status
+	}
+	if errors.Is(err, rdp.ErrUnavailable) {
+		detail["gateway"] = "unreachable"
+	}
+
+	s.audit.Record(r, Entry{
+		Action:   ActionSessionFailed,
+		Target:   host.Address(),
+		Host:     host,
+		Result:   store.AuditFailure,
+		Severity: severity,
+		Detail:   detail,
+	})
+	s.fail(w, r, err)
 }
 
 // respondSessionError turns a dial failure into something the UI can act on.
@@ -288,32 +373,63 @@ func (s *Server) respondSessionError(w http.ResponseWriter, r *http.Request, hos
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	infos := s.sessions.Infos(s.principal(r).UserID)
+	userID := s.principal(r).UserID
+
+	// One list across both kinds of session. A tab strip does not care which
+	// registry a session came from, and a client that had to merge two endpoints
+	// would be a client that could get the merge wrong.
+	ptys := s.sessions.Infos(userID)
+	desktops := s.desktops.Infos(userID)
+
+	infos := make([]any, 0, len(ptys)+len(desktops))
+	for i := range ptys {
+		infos = append(infos, ptys[i])
+	}
+	for i := range desktops {
+		infos = append(infos, desktops[i])
+	}
 	writeList(w, infos, len(infos))
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	session, err := s.sessions.GetForUser(s.principal(r).UserID, r.PathValue("id"))
+	userID := s.principal(r).UserID
+	id := r.PathValue("id")
+
+	if session, err := s.sessions.GetForUser(userID, id); err == nil {
+		httpx.WriteJSON(w, http.StatusOK, session.Info())
+		return
+	}
+	desktop, err := s.desktops.GetForUser(userID, id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, session.Info())
+	httpx.WriteJSON(w, http.StatusOK, desktop.Info())
 }
 
 func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	p := s.principal(r)
 	id := r.PathValue("id")
 
-	session, err := s.sessions.GetForUser(p.UserID, id)
+	if session, err := s.sessions.GetForUser(p.UserID, id); err == nil {
+		label := session.HostLabel
+		session.Close("closed by user")
+		s.audit.Success(r, ActionSessionClose, label, map[string]any{"session_id": id})
+		httpx.NoContent(w)
+		return
+	}
+
+	desktop, err := s.desktops.GetForUser(p.UserID, id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	label := session.HostLabel
-	session.Close("closed by user")
-
-	s.audit.Success(r, ActionSessionClose, label, map[string]any{"session_id": id})
+	label := desktop.HostLabel
+	desktop.Close("closed by user")
+	s.audit.Success(r, ActionSessionClose, label, map[string]any{
+		"session_id": id,
+		"protocol":   string(desktop.Protocol),
+	})
 	httpx.NoContent(w)
 }
 
@@ -324,23 +440,43 @@ type ticketResponse struct {
 	Seq uint64 `json:"seq"`
 }
 
+// handleSessionTicket issues the single-use ticket that authorises a WebSocket.
+//
+// The purpose is bound to the kind of session, and TicketStore.Consume checks it,
+// so a ticket minted for a desktop cannot be spent on /ws/terminal or the reverse.
 func (s *Server) handleSessionTicket(w http.ResponseWriter, r *http.Request) {
 	p := s.principal(r)
-	session, err := s.sessions.GetForUser(p.UserID, r.PathValue("id"))
-	if err != nil {
-		s.fail(w, r, err)
+	id := r.PathValue("id")
+
+	if session, err := s.sessions.GetForUser(p.UserID, id); err == nil {
+		ticket, terr := s.auth.Tickets().Issue(p.UserID, session.ID, httpx.ClientIP(r.Context()), "terminal")
+		if terr != nil {
+			s.fail(w, r, terr)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, ticketResponse{
+			Ticket:    ticket.Value,
+			ExpiresIn: int(time.Until(ticket.ExpiresAt).Seconds()),
+			Seq:       session.Info().Seq,
+		})
 		return
 	}
 
-	ticket, err := s.auth.Tickets().Issue(p.UserID, session.ID, httpx.ClientIP(r.Context()), "terminal")
+	desktop, err := s.desktops.GetForUser(p.UserID, id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	ticket, err := s.auth.Tickets().Issue(p.UserID, desktop.ID, httpx.ClientIP(r.Context()), "rdp")
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// No Seq: a desktop has no byte offset to resume from. Its reattach mechanism
+	// is a full repaint, not a delta.
 	httpx.WriteJSON(w, http.StatusOK, ticketResponse{
 		Ticket:    ticket.Value,
 		ExpiresIn: int(time.Until(ticket.ExpiresAt).Seconds()),
-		Seq:       session.Info().Seq,
 	})
 }
 
@@ -362,6 +498,9 @@ func (s *Server) handleEventsTicket(w http.ResponseWriter, r *http.Request) {
 type resizeRequest struct {
 	Cols int `json:"cols"`
 	Rows int `json:"rows"`
+	// Desktop sessions resize in pixels.
+	Width  int `json:"width"`
+	Height int `json:"height"`
 }
 
 func (s *Server) handleResizeSession(w http.ResponseWriter, r *http.Request) {
@@ -369,20 +508,50 @@ func (s *Server) handleResizeSession(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := validate.TerminalSize(req.Cols, req.Rows); err != nil {
-		httpx.ValidationFailed(w, r, map[string]any{"cols": err.Error()})
+	p := s.principal(r)
+	id := r.PathValue("id")
+
+	if session, err := s.sessions.GetForUser(p.UserID, id); err == nil {
+		if verr := validate.TerminalSize(req.Cols, req.Rows); verr != nil {
+			httpx.ValidationFailed(w, r, map[string]any{"cols": verr.Error()})
+			return
+		}
+		if rerr := session.Resize(req.Cols, req.Rows); rerr != nil {
+			s.fail(w, r, rerr)
+			return
+		}
+		httpx.NoContent(w)
 		return
 	}
-	session, err := s.sessions.GetForUser(s.principal(r).UserID, r.PathValue("id"))
+
+	desktop, err := s.desktops.GetForUser(p.UserID, id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if err := session.Resize(req.Cols, req.Rows); err != nil {
+	if verr := validateDesktopSize(req.Width, req.Height); verr != nil {
+		httpx.ValidationFailed(w, r, map[string]any{"width": verr.Error()})
+		return
+	}
+	if err := desktop.Resize(req.Width, req.Height); err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	httpx.NoContent(w)
+}
+
+// validateDesktopSize bounds a requested desktop geometry.
+//
+// The same bounds the WebSocket control path enforces; a desktop dimension becomes
+// a framebuffer allocation in guacd either way.
+func validateDesktopSize(width, height int) error {
+	if width < 640 || height < 480 {
+		return errors.New("a display smaller than 640x480 is not usable")
+	}
+	if width > 8192 || height > 8192 {
+		return errors.New("a display larger than 8192 pixels on an edge is not supported")
+	}
+	return nil
 }
 
 type recordingRequest struct {
@@ -441,4 +610,49 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeList(w, records, len(records))
+}
+
+// handleDeleteRecentSession removes one entry from the Recent list.
+//
+// This edits *history*, not the inventory: the host stays, and so does the audit
+// log, which is a separate append-only table this cannot touch. Recorded as a
+// notice so that curating the list is itself visible.
+func (s *Server) handleDeleteRecentSession(w http.ResponseWriter, r *http.Request) {
+	p := s.principal(r)
+	id := r.PathValue("id")
+
+	record, err := s.store.SessionRecordByID(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.store.DeleteSessionRecord(r.Context(), p.UserID, id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.audit.Record(r, Entry{
+		Action:   ActionSessionHistoryDelete,
+		Target:   record.HostSnapshot,
+		Severity: store.SeverityNotice,
+		Detail:   map[string]any{"session_record_id": id},
+	})
+	httpx.NoContent(w)
+}
+
+// handleClearRecentSessions empties the Recent list, leaving live sessions alone.
+func (s *Server) handleClearRecentSessions(w http.ResponseWriter, r *http.Request) {
+	p := s.principal(r)
+
+	removed, err := s.store.DeleteSessionRecordsForUser(r.Context(), p.UserID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.audit.Record(r, Entry{
+		Action:   ActionSessionHistoryDelete,
+		Target:   "all",
+		Severity: store.SeverityNotice,
+		Detail:   map[string]any{"removed": removed},
+	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"removed": removed})
 }

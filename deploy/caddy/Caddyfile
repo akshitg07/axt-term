@@ -41,9 +41,6 @@
 	handle /api/v1/hosts/*/fs/* {
 		reverse_proxy axt-term:8080 {
 			flush_interval -1
-			request_body {
-				max_size 0
-			}
 		}
 	}
 

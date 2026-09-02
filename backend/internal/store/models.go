@@ -133,10 +133,17 @@ func (p Protocol) Valid() bool {
 // by this build. Everything else is inventory-only and the UI labels it.
 func (p Protocol) Implemented() bool {
 	switch p {
-	case ProtocolSSH, ProtocolSFTP, ProtocolRDP:
+	case ProtocolSSH, ProtocolSFTP, ProtocolRDP, ProtocolVNC:
 		return true
 	}
 	return false
+}
+
+// Desktop reports whether the protocol is a graphical session served through the
+// guacd bridge rather than a PTY. The two kinds of session have different
+// registries, different WebSocket endpoints, and different panels.
+func (p Protocol) Desktop() bool {
+	return p == ProtocolRDP || p == ProtocolVNC
 }
 
 // OSFamily narrows which contextual actions a host offers.
@@ -264,9 +271,14 @@ func (h *Host) Label() string {
 // RDPOptions carries per-host RDP settings. Clipboard and drive redirection are
 // off by default: each is a bidirectional data path into a Windows host and
 // should be a decision rather than an accident.
+//
+// The same record carries the VNC settings, because the two protocols reach the
+// browser through one guacd bridge and share most of what matters -- display size,
+// colour depth, clipboard. The column behind it is TEXT JSON, so a field added
+// here needs no migration.
 type RDPOptions struct {
 	Domain            string `json:"domain,omitempty"`
-	Security          string `json:"security,omitempty"` // any, nla, tls, rdp
+	Security          string `json:"security,omitempty"` // any, nla, nla-ext, tls, vmconnect, rdp
 	IgnoreCert        bool   `json:"ignore_cert,omitempty"`
 	EnableClipboard   bool   `json:"enable_clipboard,omitempty"`
 	EnableDrive       bool   `json:"enable_drive,omitempty"`
@@ -280,6 +292,34 @@ type RDPOptions struct {
 	ResizeMethod      string `json:"resize_method,omitempty"` // display-update, reconnect
 	RemoteApp         string `json:"remote_app,omitempty"`
 	PreconnectionBlob string `json:"preconnection_blob,omitempty"`
+
+	// --- RDP, less commonly set but load-bearing when it is ---------------
+
+	// Console attaches to the Windows admin session rather than a new one.
+	Console bool `json:"console,omitempty"`
+	// ServerLayout is the RDP keyboard layout, e.g. en-us-qwerty. Wrong layouts
+	// are a classic RDP complaint: the password types correctly locally and is
+	// rejected remotely because the punctuation moved.
+	ServerLayout string `json:"server_layout,omitempty"`
+	// Timezone is an IANA zone redirected to the session.
+	Timezone string `json:"timezone,omitempty"`
+	// EnableTheming and EnableFontSmoothing trade bandwidth for looking normal.
+	EnableTheming       bool `json:"enable_theming,omitempty"`
+	EnableFontSmoothing bool `json:"enable_font_smoothing,omitempty"`
+
+	// --- VNC -------------------------------------------------------------
+
+	// SwapRedBlue corrects servers that report their pixel order incorrectly,
+	// which presents as a blue-tinted desktop.
+	SwapRedBlue bool `json:"swap_red_blue,omitempty"`
+	// Cursor is "local" or "remote". Remote is correct more often; local hides
+	// the round-trip on a slow link.
+	Cursor string `json:"cursor,omitempty"`
+	// ReadOnly observes without sending input.
+	ReadOnly bool `json:"read_only,omitempty"`
+	// ClipboardEncoding is ISO8859-1, UTF-8, CP1252, or ISO8859-2. The VNC
+	// clipboard has no encoding negotiation, so a mismatch mangles non-ASCII.
+	ClipboardEncoding string `json:"clipboard_encoding,omitempty"`
 }
 
 // Tag is a free-form host label.

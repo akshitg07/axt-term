@@ -134,6 +134,48 @@ func (s *Store) RecentSessions(ctx context.Context, userID string, limit int) ([
 	return out, rows.Err()
 }
 
+// DeleteSessionRecord removes one history entry belonging to a user.
+//
+// Scoped by user_id in the statement rather than checked beforehand, so a
+// mismatched id cannot delete somebody else's history through a race between the
+// check and the delete. A row that does not match reports ErrNotFound, which is
+// also what a caller sees for an id that never existed -- the two are the same
+// thing from outside.
+//
+// History is a convenience list, not an audit trail: the audit log is separate,
+// append-only, and unaffected by this. Curating what appears under Recent must not
+// be a way to erase evidence, and it is not.
+func (s *Store) DeleteSessionRecord(ctx context.Context, userID, id string) error {
+	res, err := s.write.ExecContext(ctx,
+		`DELETE FROM session_records WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteSessionRecordsForUser clears a user's session history.
+//
+// Live sessions are left alone: their rows are rewritten when they close, and
+// clearing the list must not appear to disconnect anything.
+func (s *Store) DeleteSessionRecordsForUser(ctx context.Context, userID string) (int, error) {
+	res, err := s.write.ExecContext(ctx, `
+		DELETE FROM session_records
+		WHERE user_id = ? AND status NOT IN ('connecting', 'connected')`, userID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // SweepOpenSessions marks sessions left open by a crash or restart as closed.
 //
 // Called at startup: a session row stuck in "connected" with no live PTY behind

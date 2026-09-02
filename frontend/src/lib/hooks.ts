@@ -89,7 +89,15 @@ export function useTransfers() {
   })
 }
 
-export function useHostActions(hostId: string | undefined) {
+/**
+ * The contextual actions a host offers, as the server reports them.
+ *
+ * Distinct from `useHostActions` below, which is the set of *mutations* a sidebar
+ * row performs. This one is a read: the server decides which actions a host
+ * supports and which are still unimplemented, so the UI can label them rather
+ * than guessing from the protocol.
+ */
+export function useHostActionList(hostId: string | undefined) {
   return useQuery({
     queryKey: ['host-actions', hostId],
     queryFn: () => api.get<ListResponse<HostAction>>(`/api/v1/hosts/${hostId}/actions`),
@@ -128,6 +136,27 @@ interface OpenSessionInput {
   tabId?: string
 }
 
+/** Protocols served by the guacd bridge rather than a PTY. */
+export function isDesktopProtocol(protocol: Host['protocol']): boolean {
+  return protocol === 'rdp' || protocol === 'vnc'
+}
+
+/**
+ * An opening size for a desktop, in pixels.
+ *
+ * A first guess from the viewport: the pane has not been laid out when the session
+ * is created, and the RDP pane resizes to its real geometry as soon as it mounts.
+ * Guessing beats sending nothing, because the first frames guacd draws are at
+ * whatever size the handshake agreed.
+ */
+function desktopGeometry(): { width: number; height: number; dpi: number } {
+  // Rough allowance for the sidebar, tab strip, toolbar, and status bar, so the
+  // first paint is close to the space the pane will actually have.
+  const width = Math.max(640, Math.round(window.innerWidth - 280))
+  const height = Math.max(480, Math.round(window.innerHeight - 130))
+  return { width, height, dpi: Math.round(96 * (window.devicePixelRatio || 1)) }
+}
+
 /**
  * Opens a session and a tab for it.
  *
@@ -146,6 +175,7 @@ export function useOpenSession() {
 
   return useMutation({
     mutationFn: async ({ host, panel = 'terminal', tabId }: OpenSessionInput) => {
+      const desktop = isDesktopProtocol(host.protocol)
       const id =
         tabId ??
         openTab({
@@ -160,8 +190,7 @@ export function useOpenSession() {
       try {
         const response = await api.post<CreateSessionResponse>('/api/v1/sessions', {
           host_id: host.id,
-          cols: 80,
-          rows: 24,
+          ...(desktop ? desktopGeometry() : { cols: 80, rows: 24 }),
         })
 
         if (response.state === 'pending_hostkey' && response.pending_hostkey) {
@@ -231,6 +260,140 @@ export function useTrustHostKey() {
       })
     },
   })
+}
+
+/* ------------------------------------------------------- managing connections --- */
+
+/**
+ * Mutations behind the sidebar's row actions.
+ *
+ * Grouped in one hook because a row needs most of them at once and six separate
+ * hooks per row would be six subscriptions per host, with hundreds of hosts on
+ * screen.
+ *
+ * Every one of these invalidates rather than patching the cache: an edit can change
+ * a host's folder, favourite status, and name at once, which moves the row in the
+ * tree. Recomputing from the server is cheaper to be right about than replaying the
+ * same reordering rules on the client.
+ */
+export function useHostActions() {
+  const queryClient = useQueryClient()
+  const pushToast = useUI((s) => s.pushToast)
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['hosts'] })
+    void queryClient.invalidateQueries({ queryKey: ['folders'] })
+  }
+
+  const report = (title: string) => (error: unknown) =>
+    pushToast({
+      level: 'error',
+      title,
+      message: error instanceof ApiError ? error.message : 'Unexpected error',
+    })
+
+  const toggleFavorite = useMutation({
+    mutationFn: (host: Host) =>
+      api.post(`/api/v1/hosts/${host.id}/favorite`, { is_favorite: !host.is_favorite }),
+    onSuccess: refresh,
+    onError: report('Could not change the favourite'),
+  })
+
+  const duplicate = useMutation({
+    mutationFn: (host: Host) => api.post<Host>(`/api/v1/hosts/${host.id}/duplicate`),
+    onSuccess: (created) => {
+      refresh()
+      pushToast({ level: 'success', title: `Duplicated as ${created.name}` })
+    },
+    onError: report('Could not duplicate the host'),
+  })
+
+  const remove = useMutation({
+    mutationFn: (host: Host) => api.del(`/api/v1/hosts/${host.id}`),
+    onSuccess: (_result, host) => {
+      refresh()
+      void queryClient.invalidateQueries({ queryKey: ['recent-sessions'] })
+      pushToast({ level: 'success', title: `Deleted ${host.name}` })
+    },
+    onError: report('Could not delete the host'),
+  })
+
+  const rename = useMutation({
+    // The update endpoint replaces the host from the request body rather than
+    // patching named fields, so a rename sends the host it already has with one
+    // value changed. Sending only {name} would blank everything else.
+    mutationFn: ({ host, name }: { host: Host; name: string }) =>
+      api.patch<Host>(`/api/v1/hosts/${host.id}`, {
+        name,
+        hostname: host.hostname,
+        port: host.port,
+        protocol: host.protocol,
+        folder_id: host.folder_id,
+        username: host.username,
+        auth_method: host.auth_method,
+        credential_id: host.credential_id,
+        jump_host_id: host.jump_host_id,
+        os_family: host.os_family,
+        color: host.color,
+        icon: host.icon,
+        notes: host.notes,
+        is_favorite: host.is_favorite,
+        health_check_enabled: host.health_check_enabled,
+        health_check_interval_s: host.health_check_interval_s,
+        command_logging: host.command_logging,
+        rdp_options: host.rdp_options,
+        tags: host.tags,
+      }),
+    onSuccess: refresh,
+    onError: report('Could not rename the host'),
+  })
+
+  return { toggleFavorite, duplicate, remove, rename }
+}
+
+/**
+ * Mutations for curating the Recent list.
+ *
+ * This edits session *history*, which is a convenience list. The audit log is a
+ * separate append-only table and is not touched, so removing a row here tidies the
+ * sidebar without erasing any record of the connection.
+ */
+export function useRecentActions() {
+  const queryClient = useQueryClient()
+  const pushToast = useUI((s) => s.pushToast)
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['recent-sessions'] })
+
+  const remove = useMutation({
+    mutationFn: (recordId: string) => api.del(`/api/v1/sessions/recent/${recordId}`),
+    onSuccess: () => void refresh(),
+    onError: (error) =>
+      pushToast({
+        level: 'error',
+        title: 'Could not remove that entry',
+        message: error instanceof ApiError ? error.message : 'Unexpected error',
+      }),
+  })
+
+  const clear = useMutation({
+    mutationFn: () => api.del<{ removed: number }>('/api/v1/sessions/recent'),
+    onSuccess: (result) => {
+      void refresh()
+      pushToast({
+        level: 'success',
+        title: 'Recent list cleared',
+        message: `${result?.removed ?? 0} entries removed. The audit log is unaffected.`,
+      })
+    },
+    onError: (error) =>
+      pushToast({
+        level: 'error',
+        title: 'Could not clear the list',
+        message: error instanceof ApiError ? error.message : 'Unexpected error',
+      }),
+  })
+
+  return { remove, clear }
 }
 
 /* ------------------------------------------------------------ event stream --- */

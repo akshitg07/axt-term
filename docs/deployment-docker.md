@@ -16,15 +16,44 @@ cp .env.example .env
 # The master key encrypts every stored credential. Generate it once.
 mkdir -p secrets
 openssl rand -base64 32 > secrets/axt_master_key
+# Owned by the service user: Compose bind-mounts this file through to the
+# container, where the process runs as uid 10001 and a root-owned mode-600 file
+# would be unreadable.
+chown 10001:10001 secrets/axt_master_key
 chmod 600 secrets/axt_master_key
 
-# Set the hostname browsers will use. Cookie security depends on this being right.
-echo 'AXT_DOMAIN=axt-term.lan'            >> .env
-echo 'AXT_PUBLIC_URL=https://axt-term.lan' >> .env
+# The address browsers will use, port included. Cookie security and the accepted
+# WebSocket origin both derive from this, and both fail closed if it is wrong.
+echo 'AXT_PUBLIC_URL=http://192.0.2.10:8081' >> .env
 
 docker compose up -d
+docker compose ps          # axt-term and guacd should be healthy
+```
+
+The UI is now on `http://<server-ip>:8081`. Set `AXT_PORT` in `.env` if that port is
+taken, and keep `AXT_PUBLIC_URL` in agreement with it.
+
+This serves plain HTTP, so session cookies cannot use the `Secure` attribute and
+credentials cross the network in clear text. That is an acceptable trade on a
+trusted LAN and a bad one anywhere else.
+
+### With TLS on a hostname
+
+Caddy sits behind a Compose profile, so it starts only when asked:
+
+```bash
+echo 'AXT_DOMAIN=axt-term.lan'             >> .env
+echo 'AXT_PUBLIC_URL=https://axt-term.lan' >> .env
+echo 'AXT_TRUSTED_PROXIES=172.28.0.0/16'   >> .env
+
+docker compose --profile tls up -d
 docker compose ps          # all three services should be healthy
 ```
+
+`AXT_TRUSTED_PROXIES` matters here: without it the audit log records Caddy's
+container address for every request instead of the real client's. Leave it empty
+for direct access, where trusting `X-Forwarded-For` would let any client forge
+that address.
 
 Create the first administrator. There is deliberately no web-based signup: an
 attacker who reaches the login page must not be able to mint an account.
@@ -180,7 +209,7 @@ docker compose exec axt-term axt-admin audit prune --before 2025-01-01  # report
 ## 6. Hardening checklist
 
 - [ ] `AXT_PUBLIC_URL` is `https://` and matches what users type
-- [ ] `secrets/axt_master_key` is mode 600 and backed up **away from** the database
+- [ ] `secrets/axt_master_key` is mode 600, owned by `10001:10001`, and backed up **away from** the database
 - [ ] `AXT_TRUSTED_PROXIES` names only the reverse proxy's network
 - [ ] `AXT_SSH_HOSTKEY_POLICY=strict` once your inventory's keys are trusted
 - [ ] `AXT_SSH_LEGACY_ALGOS=false` unless specific network gear requires it

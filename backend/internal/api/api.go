@@ -14,6 +14,7 @@ import (
 	"github.com/axt-term/axt-term/backend/internal/httpx"
 	"github.com/axt-term/axt-term/backend/internal/inventory"
 	"github.com/axt-term/axt-term/backend/internal/rbac"
+	"github.com/axt-term/axt-term/backend/internal/rdp"
 	"github.com/axt-term/axt-term/backend/internal/sshx"
 	"github.com/axt-term/axt-term/backend/internal/store"
 	"github.com/axt-term/axt-term/backend/internal/terminal"
@@ -29,6 +30,8 @@ type Server struct {
 	inventory   *inventory.Service
 	sessions    *terminal.Registry
 	bridge      *terminal.Bridge
+	desktops    *rdp.Registry
+	rdpBridge   *rdp.Bridge
 	pool        *sshx.Pool
 	bus         *events.Bus
 	audit       *Auditor
@@ -47,6 +50,8 @@ type Deps struct {
 	Inventory *inventory.Service
 	Sessions  *terminal.Registry
 	Bridge    *terminal.Bridge
+	Desktops  *rdp.Registry
+	RDPBridge *rdp.Bridge
 	Pool      *sshx.Pool
 	Bus       *events.Bus
 	Log       *slog.Logger
@@ -62,6 +67,8 @@ func New(d Deps) *Server {
 		inventory:   d.Inventory,
 		sessions:    d.Sessions,
 		bridge:      d.Bridge,
+		desktops:    d.Desktops,
+		rdpBridge:   d.RDPBridge,
 		pool:        d.Pool,
 		bus:         d.Bus,
 		audit:       NewAuditor(d.Store, d.Log),
@@ -155,6 +162,11 @@ func (s *Server) Register(rt *httpx.Router) {
 	perm(http.MethodPost, "/api/v1/sessions/{id}/resize", rbac.SessionSSH, s.handleResizeSession)
 	perm(http.MethodPost, "/api/v1/sessions/{id}/recording", rbac.SessionRecord, s.handleSessionRecording)
 	perm(http.MethodGet, "/api/v1/sessions/recent", rbac.SessionSSH, s.handleRecentSessions)
+	// Curating history. Literal path segments win over {id} in ServeMux, which is
+	// what keeps these from colliding with /sessions/{id} above -- the same
+	// arrangement GET /sessions/recent already relies on.
+	perm(http.MethodDelete, "/api/v1/sessions/recent", rbac.SessionSSH, s.handleClearRecentSessions)
+	perm(http.MethodDelete, "/api/v1/sessions/recent/{id}", rbac.SessionSSH, s.handleDeleteRecentSession)
 	perm(http.MethodPost, "/api/v1/events/ticket", rbac.HostRead, s.handleEventsTicket)
 
 	// WebSockets are streaming routes: no request timeout, no body limit.
@@ -165,6 +177,11 @@ func (s *Server) Register(rt *httpx.Router) {
 		Access: httpx.AccessPublic, Streaming: true,
 		Summary: "Terminal I/O; authenticated by single-use ticket",
 	}, s.bridge.ServeTerminal)
+	rt.HandleFunc(httpx.Route{
+		Method: http.MethodGet, Pattern: "/ws/rdp",
+		Access: httpx.AccessPublic, Streaming: true,
+		Summary: "Guacamole instruction stream for RDP and VNC; authenticated by single-use ticket",
+	}, s.rdpBridge.ServeRDP)
 	rt.HandleFunc(httpx.Route{
 		Method: http.MethodGet, Pattern: "/ws/events",
 		Access: httpx.AccessPublic, Streaming: true,
@@ -228,17 +245,26 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.As(err, &verrs):
 		httpx.ValidationFailed(w, r, verrs.Map())
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, terminal.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, terminal.ErrNotFound),
+		errors.Is(err, rdp.ErrNotFound):
 		httpx.NotFound(w, r, "resource")
 	case errors.Is(err, store.ErrConflict):
 		httpx.Conflict(w, r, err.Error())
 	case errors.Is(err, store.ErrInUse), errors.Is(err, credentials.ErrInUse):
 		httpx.Conflict(w, r, err.Error())
-	case errors.Is(err, terminal.ErrSessionLimit):
+	case errors.Is(err, terminal.ErrSessionLimit), errors.Is(err, rdp.ErrLimit):
 		httpx.WriteError(w, r, http.StatusTooManyRequests, httpx.CodeRateLimited, err.Error())
 	case errors.Is(err, terminal.ErrUnsupported), errors.Is(err, credentials.ErrProviderUnsupported),
-		errors.Is(err, inventory.ErrPromptedAuthUnavailable):
+		errors.Is(err, inventory.ErrPromptedAuthUnavailable),
+		errors.Is(err, rdp.ErrUnsupported), errors.Is(err, rdp.ErrDisabled):
 		httpx.WriteError(w, r, http.StatusNotImplemented, httpx.CodeNotImplemented, err.Error())
+	case errors.Is(err, rdp.ErrUnavailable):
+		// The gateway, not the target. Distinguished so the message does not send
+		// somebody checking a Windows host that is perfectly healthy.
+		httpx.WriteErrorDetails(w, r, http.StatusServiceUnavailable, httpx.CodeUnavailable,
+			err.Error(), map[string]any{"setting": "AXT_GUACD_ADDR"})
+	case errors.Is(err, rdp.ErrRemote), errors.Is(err, rdp.ErrHandshake):
+		httpx.WriteError(w, r, http.StatusBadGateway, httpx.CodeUpstreamFailure, err.Error())
 	case errors.Is(err, context.DeadlineExceeded):
 		httpx.WriteError(w, r, http.StatusGatewayTimeout, httpx.CodeUpstreamTimeout,
 			"the target host did not respond in time")

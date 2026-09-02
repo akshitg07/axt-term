@@ -40,6 +40,9 @@ const (
 	ActionSessionClose     = "session.close"
 	ActionSessionFailed    = "session.failed"
 	ActionSessionRecording = "session.recording"
+	// Deleting a Recent entry removes a convenience row, never an audit row, and is
+	// itself recorded so the removal is visible.
+	ActionSessionHistoryDelete = "session.history.delete"
 
 	ActionFileRead    = "file.read"
 	ActionFileWrite   = "file.write"

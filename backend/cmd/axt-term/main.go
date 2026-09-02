@@ -29,6 +29,7 @@ import (
 	"github.com/axt-term/axt-term/backend/internal/inventory"
 	"github.com/axt-term/axt-term/backend/internal/logging"
 	"github.com/axt-term/axt-term/backend/internal/rbac"
+	"github.com/axt-term/axt-term/backend/internal/rdp"
 	"github.com/axt-term/axt-term/backend/internal/sshx"
 	"github.com/axt-term/axt-term/backend/internal/store"
 	"github.com/axt-term/axt-term/backend/internal/terminal"
@@ -183,6 +184,17 @@ func run() error {
 
 	bridge := terminal.NewBridge(sessions, authSvc.Tickets(), bus, cfg.HTTP.AllowedOrigins, log)
 
+	// Remote desktops. Constructed even when no gateway is configured, so the API
+	// has something to answer with -- Create then reports the missing setting rather
+	// than the handlers having to nil-check a registry.
+	desktops := rdp.NewRegistry(rdp.Config{
+		GuacdAddr:  cfg.RDP.GuacdAddr,
+		MaxPerUser: cfg.Session.MaxPerUser,
+		IdleClose:  cfg.Session.IdleClose,
+	}, credentialSvc, st, bus, log)
+
+	rdpBridge := rdp.NewBridge(desktops, authSvc.Tickets(), cfg.HTTP.AllowedOrigins, log)
+
 	apiSrv := api.New(api.Deps{
 		Config:    cfg,
 		Store:     st,
@@ -191,6 +203,8 @@ func run() error {
 		Inventory: inventorySvc,
 		Sessions:  sessions,
 		Bridge:    bridge,
+		Desktops:  desktops,
+		RDPBridge: rdpBridge,
 		Pool:      pool,
 		Bus:       bus,
 		Log:       log,
@@ -251,6 +265,11 @@ func run() error {
 		if n := sessions.CloseAll("the server is shutting down"); n > 0 {
 			log.Info("closed live sessions", slog.Int("count", n))
 		}
+		// Desktops disconnect from guacd explicitly, so the RDP session on the
+		// Windows side ends cleanly rather than waiting out its idle timer.
+		if n := desktops.CloseAll("the server is shutting down"); n > 0 {
+			log.Info("closed live desktop sessions", slog.Int("count", n))
+		}
 		return nil
 	})
 	srv.OnShutdown("close-ssh-transports", func(context.Context) error {
@@ -266,6 +285,7 @@ func run() error {
 	// --- background work --------------------------------------------------
 	go pool.StartSweeper(ctx, time.Minute)
 	go sessions.StartSweeper(ctx, time.Minute)
+	go desktops.StartSweeper(ctx, time.Minute)
 	go inventory.NewHealthChecker(inventorySvc, st, bus, log).Run(ctx)
 	go runPeriodically(ctx, 10*time.Minute, func() { authSvc.Sweep(ctx) })
 

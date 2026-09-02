@@ -50,6 +50,12 @@ export interface HostHealth {
   error?: string
 }
 
+/**
+ * Per-host RDP settings, which also carry the VNC ones: both protocols reach the
+ * browser through the same guacd bridge and share most of what matters. Clipboard
+ * and drive redirection are off unless set — each is a bidirectional data path into
+ * the host.
+ */
 export interface RDPOptions {
   domain?: string
   security?: string
@@ -58,11 +64,27 @@ export interface RDPOptions {
   enable_drive?: boolean
   drive_path?: string
   enable_audio?: boolean
+  enable_printing?: boolean
   initial_width?: number
   initial_height?: number
   color_depth?: number
   disable_wallpaper?: boolean
   resize_method?: string
+  remote_app?: string
+  preconnection_blob?: string
+
+  /* RDP, less commonly set. */
+  console?: boolean
+  server_layout?: string
+  timezone?: string
+  enable_theming?: boolean
+  enable_font_smoothing?: boolean
+
+  /* VNC. */
+  swap_red_blue?: boolean
+  cursor?: string
+  read_only?: boolean
+  clipboard_encoding?: string
 }
 
 export interface Host {
@@ -165,6 +187,12 @@ export interface SnippetFolder {
   sort_order: number
 }
 
+/**
+ * A live session, terminal or desktop.
+ *
+ * A PTY measures itself in cells and a desktop in pixels, so the two pairs of
+ * fields are both optional rather than one pair pretending to mean both.
+ */
 export interface SessionInfo {
   id: string
   user_id: string
@@ -172,13 +200,15 @@ export interface SessionInfo {
   host_label: string
   protocol: Protocol
   state: SessionState
-  cols: number
-  rows: number
+  cols?: number
+  rows?: number
+  width?: number
+  height?: number
   attachments: number
-  seq: number
+  seq?: number
   bytes_in: number
   bytes_out: number
-  recording: boolean
+  recording?: boolean
   exit_reason?: string
   created_at: string
   detached_for_s?: number
