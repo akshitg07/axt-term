@@ -365,7 +365,7 @@ export function useRecentActions() {
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['recent-sessions'] })
 
   const remove = useMutation({
-    mutationFn: (recordId: string) => api.del(`/api/v1/sessions/recent/${recordId}`),
+    mutationFn: (recordId: string) => api.del(`/api/v1/recent-sessions/${recordId}`),
     onSuccess: () => void refresh(),
     onError: (error) =>
       pushToast({

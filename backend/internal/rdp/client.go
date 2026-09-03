@@ -125,6 +125,69 @@ type Client struct {
 
 	// version is the protocol version guacd announced in `args`.
 	version string
+
+	// negotiates records whether guacd announced a version at all. A daemon
+	// predating 1.1.0 does not, and the difference changes the shape of
+	// `connect`: see connectValues.
+	negotiates bool
+}
+
+// maxProtocolVersion is the newest Guacamole protocol version this client
+// implements.
+//
+// Negotiation settles on the lower of this and what guacd announces. Claiming a
+// version we do not implement would invite instructions the relay cannot carry,
+// so this is raised deliberately rather than tracking whatever guacd happens to
+// be.
+const maxProtocolVersion = "VERSION_1_5_0"
+
+// protocolVersion100 is the version that predates negotiation. guacd 1.0.0 sends
+// no version element in `args`, and reporting that explicitly is more useful than
+// reporting an empty string.
+const protocolVersion100 = "VERSION_1_0_0"
+
+// parseProtocolVersion parses a `VERSION_1_5_0` token into comparable parts.
+//
+// The ok result is what distinguishes guacd's version announcement from a
+// parameter that merely occupies the first position, which is the whole reason
+// readArgs can tell one daemon generation from another.
+func parseProtocolVersion(token string) ([3]int, bool) {
+	rest, found := strings.CutPrefix(token, "VERSION_")
+	if !found {
+		return [3]int{}, false
+	}
+	parts := strings.Split(rest, "_")
+	if len(parts) != 3 {
+		return [3]int{}, false
+	}
+	var out [3]int
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return [3]int{}, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+// negotiatedVersion returns the version to answer guacd's announcement with: the
+// lower of what it offered and what this client implements.
+func negotiatedVersion(announced string) string {
+	theirs, ok := parseProtocolVersion(announced)
+	if !ok {
+		return maxProtocolVersion
+	}
+	ours, _ := parseProtocolVersion(maxProtocolVersion)
+	for i := range ours {
+		if theirs[i] != ours[i] {
+			if theirs[i] < ours[i] {
+				return announced
+			}
+			return maxProtocolVersion
+		}
+	}
+	return maxProtocolVersion
 }
 
 // mimetypes we advertise during the handshake.
@@ -214,12 +277,9 @@ func (c *Client) Handshake(ctx context.Context, protocol string, params map[stri
 		return err
 	}
 
-	// Positional mapping. Unknown-to-us parameters are sent empty, which guacd
-	// treats as "use the default" -- the same thing the Guacamole web client does.
-	values := make([]string, len(names))
-	for i, name := range names {
-		values[i] = params[name]
-	}
+	// Positional mapping, with guacd's version announcement answered in the
+	// leading slot when it made one.
+	values := c.connectValues(names, params)
 	if err := c.w.Write("connect", values...); err != nil {
 		return fmt.Errorf("%w: sending connect: %w", ErrHandshake, err)
 	}
@@ -266,8 +326,10 @@ func (c *Client) Join(ctx context.Context, connectionID string, display Display)
 	}
 
 	// A joining client supplies no connection parameters: the connection already
-	// exists and its parameters are guacd's, not ours to restate.
-	values := make([]string, len(names))
+	// exists and its parameters are guacd's, not ours to restate. The version slot
+	// is still answered -- guacd counts the elements it asked for whether or not a
+	// join has anything to say in them.
+	values := c.connectValues(names, nil)
 	if err := c.w.Write("connect", values...); err != nil {
 		return fmt.Errorf("%w: sending connect for join: %w", ErrHandshake, err)
 	}
@@ -300,9 +362,11 @@ func (c *Client) sendClientCapabilities(display Display) error {
 
 // readArgs reads the `args` instruction and returns the parameter names.
 //
-// The first element is the protocol version, not a parameter, so it is split off
-// rather than being mistaken for one -- sending a value in its position would
-// shift every subsequent parameter by one and produce a connection with the
+// The first element is guacd's protocol version rather than a parameter name --
+// but only from 1.1.0 onwards, which is when version negotiation was added. A
+// daemon old enough to omit it names a parameter in that position, so the element
+// is consumed only when it actually parses as a version. Consuming it blindly
+// would shift every subsequent parameter by one and produce a connection with the
 // password in the domain field.
 func (c *Client) readArgs() ([]string, error) {
 	in, err := c.readSkippingNops()
@@ -315,15 +379,46 @@ func (c *Client) readArgs() ([]string, error) {
 	if in.Opcode != "args" {
 		return nil, fmt.Errorf("%w: expected args, got %q", ErrHandshake, in.Opcode)
 	}
-	if len(in.Args) == 0 {
-		return nil, fmt.Errorf("%w: args carried no protocol version", ErrHandshake)
+
+	names := in.Args
+	c.version = protocolVersion100
+	c.negotiates = false
+	if len(names) > 0 {
+		if _, ok := parseProtocolVersion(names[0]); ok {
+			c.version = names[0]
+			c.negotiates = true
+			names = names[1:]
+		}
 	}
 
-	c.version = in.Args[0]
-	names := in.Args[1:]
 	out := make([]string, len(names))
 	copy(out, names)
 	return out, nil
+}
+
+// connectValues builds the positional payload for `connect`.
+//
+// guacd matches the values to the names it sent in `args`, and when it announced a
+// protocol version the leading element answers that announcement rather than
+// naming a parameter. That element is load-bearing in a way the error message does
+// not admit: guacd counts it, so omitting it leaves the payload one short of what
+// guacd expects, and guacd reports the mismatch as "Client did not return the
+// expected number of arguments" *after* it has already sent `ready`. The
+// handshake therefore looks like it succeeded -- a session opens, a version is
+// logged -- and the connection is dropped a moment later.
+//
+// params may be nil, which is how a joining client restates no parameters.
+func (c *Client) connectValues(names []string, params map[string]string) []string {
+	values := make([]string, 0, len(names)+1)
+	if c.negotiates {
+		values = append(values, negotiatedVersion(c.version))
+	}
+	for _, name := range names {
+		// Unknown-to-us parameters are sent empty, which guacd treats as "use the
+		// default" -- the same thing the Guacamole web client does.
+		values = append(values, params[name])
+	}
+	return values
 }
 
 // readReady reads the `ready` instruction that completes the handshake.

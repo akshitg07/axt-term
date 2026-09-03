@@ -162,9 +162,15 @@ func (s *Server) Register(rt *httpx.Router) {
 	perm(http.MethodPost, "/api/v1/sessions/{id}/resize", rbac.SessionSSH, s.handleResizeSession)
 	perm(http.MethodPost, "/api/v1/sessions/{id}/recording", rbac.SessionRecord, s.handleSessionRecording)
 	perm(http.MethodGet, "/api/v1/sessions/recent", rbac.SessionSSH, s.handleRecentSessions)
-	// Curating history. Literal path segments win over {id} in ServeMux, which is
-	// what keeps these from colliding with /sessions/{id} above -- the same
-	// arrangement GET /sessions/recent already relies on.
+	// Curating history. A literal segment does win over {id} at the same depth,
+	// which is why GET /sessions/recent coexists with GET /sessions/{id} -- but
+	// that only holds while the literal is the *last* segment. Per-record deletion
+	// therefore lives outside the /sessions/ subtree entirely: any
+	// /sessions/<literal>/{id} pattern overlaps /sessions/{id}/<literal> on paths
+	// like /sessions/recent/ticket, ServeMux considers neither more specific, and
+	// it panics at registration -- taking the process down on every start rather
+	// than failing a request. The id here is a history record's, not a live
+	// session's, so the separate path is honest about naming a different resource.
 	perm(http.MethodDelete, "/api/v1/sessions/recent", rbac.SessionSSH, s.handleClearRecentSessions)
 	perm(http.MethodDelete, "/api/v1/recent-sessions/{id}", rbac.SessionSSH, s.handleDeleteRecentSession)
 	perm(http.MethodPost, "/api/v1/events/ticket", rbac.HostRead, s.handleEventsTicket)

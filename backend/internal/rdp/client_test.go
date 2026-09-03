@@ -120,13 +120,16 @@ func TestHandshakeMapsConnectPositionally(t *testing.T) {
 	if connect.Opcode != "connect" {
 		t.Fatalf("expected connect, got %q", connect.Opcode)
 	}
-	want := []string{"3389", "", "hunter2", "10.0.4.11", "CORP", "administrator"}
+	// The leading element answers guacd's version announcement; the parameter
+	// values follow in the order guacd named them. guacd counts the version slot,
+	// so a payload without it is one element short of what guacd expects.
+	want := []string{"VERSION_1_5_0", "3389", "", "hunter2", "10.0.4.11", "CORP", "administrator"}
 	if len(connect.Args) != len(want) {
 		t.Fatalf("connect carried %d values, want %d: %#v", len(connect.Args), len(want), connect.Args)
 	}
 	for i := range want {
 		if connect.Args[i] != want[i] {
-			t.Errorf("connect value %d (%s) = %q, want %q", i, names[i], connect.Args[i], want[i])
+			t.Errorf("connect value %d = %q, want %q", i, connect.Args[i], want[i])
 		}
 	}
 
@@ -297,11 +300,129 @@ func TestJoinSelectsTheExistingConnection(t *testing.T) {
 	}
 
 	// A joining client restates no parameters: the connection already exists and
-	// its parameters are guacd's, not ours to resend.
-	for i, value := range connect.Args {
+	// its parameters are guacd's, not ours to resend. The version slot is still
+	// answered, because guacd counts every element it asked for.
+	if len(connect.Args) != 3 {
+		t.Fatalf("join connect carried %d values, want 3: %#v", len(connect.Args), connect.Args)
+	}
+	if connect.Arg(0) != "VERSION_1_5_0" {
+		t.Errorf("join connect value 0 = %q, want the negotiated version", connect.Arg(0))
+	}
+	for i, value := range connect.Args[1:] {
 		if value != "" {
-			t.Errorf("join connect value %d = %q, want empty", i, value)
+			t.Errorf("join connect value %d = %q, want empty", i+1, value)
 		}
+	}
+}
+
+// TestHandshakeAnswersTheVersionAnnouncement covers the arity rule that guacd
+// reports as "Client did not return the expected number of arguments" -- and
+// reports only *after* sending `ready`, so the handshake looks like it worked and
+// the desktop dies a moment later.
+func TestHandshakeAnswersTheVersionAnnouncement(t *testing.T) {
+	client, guacd := newFakeGuacd(t)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- client.Handshake(ctx, "rdp", Params{"hostname": "h"}, Display{Width: 1024, Height: 768})
+	}()
+
+	guacd.read()
+	guacd.write("args", "VERSION_1_5_0", "hostname", "port")
+	for i := 0; i < 4; i++ {
+		guacd.read()
+	}
+	connect := guacd.read()
+	guacd.write("ready", "$id")
+	if err := <-done; err != nil {
+		t.Fatalf("Handshake returned %v", err)
+	}
+
+	// Three elements for three announced: the version plus two parameters.
+	if len(connect.Args) != 3 {
+		t.Fatalf("connect carried %d values, want 3: %#v", len(connect.Args), connect.Args)
+	}
+	if connect.Arg(0) != "VERSION_1_5_0" {
+		t.Errorf("connect value 0 = %q, want the negotiated version", connect.Arg(0))
+	}
+	if connect.Arg(1) != "h" {
+		t.Errorf("connect value 1 = %q, want the hostname", connect.Arg(1))
+	}
+}
+
+// TestHandshakeNegotiatesDownToGuacdsVersion covers a daemon older than this
+// client: answering with our own newer version would claim support for
+// instructions guacd will not send and we have not implemented against.
+func TestHandshakeNegotiatesDownToGuacdsVersion(t *testing.T) {
+	client, guacd := newFakeGuacd(t)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- client.Handshake(ctx, "rdp", Params{"hostname": "h"}, Display{Width: 1024, Height: 768})
+	}()
+
+	guacd.read()
+	guacd.write("args", "VERSION_1_1_0", "hostname")
+	for i := 0; i < 4; i++ {
+		guacd.read()
+	}
+	connect := guacd.read()
+	guacd.write("ready", "$id")
+	if err := <-done; err != nil {
+		t.Fatalf("Handshake returned %v", err)
+	}
+
+	if connect.Arg(0) != "VERSION_1_1_0" {
+		t.Errorf("connect value 0 = %q, want guacd's older version", connect.Arg(0))
+	}
+	if client.Version() != "VERSION_1_1_0" {
+		t.Errorf("Version() = %q", client.Version())
+	}
+}
+
+// TestHandshakeTreatsAMissingVersionAsAParameter covers guacd 1.0.0, which
+// predates version negotiation and names a parameter in the position later
+// daemons use for the version. Consuming that element as a version would shift
+// every parameter by one -- the failure mode that puts the password in the domain
+// field -- and would send one value too few besides.
+func TestHandshakeTreatsAMissingVersionAsAParameter(t *testing.T) {
+	client, guacd := newFakeGuacd(t)
+
+	done := make(chan error, 1)
+	go func() {
+		params := Params{"hostname": "10.0.4.11", "password": "hunter2"}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- client.Handshake(ctx, "rdp", params, Display{Width: 1024, Height: 768})
+	}()
+
+	guacd.read()
+	// No version element: the first name is a real parameter.
+	guacd.write("args", "hostname", "password")
+	for i := 0; i < 4; i++ {
+		guacd.read()
+	}
+	connect := guacd.read()
+	guacd.write("ready", "$id")
+	if err := <-done; err != nil {
+		t.Fatalf("Handshake returned %v", err)
+	}
+
+	want := []string{"10.0.4.11", "hunter2"}
+	if len(connect.Args) != len(want) {
+		t.Fatalf("connect carried %d values, want %d: %#v", len(connect.Args), len(want), connect.Args)
+	}
+	for i := range want {
+		if connect.Args[i] != want[i] {
+			t.Errorf("connect value %d = %q, want %q", i, connect.Args[i], want[i])
+		}
+	}
+	if client.Version() != protocolVersion100 {
+		t.Errorf("Version() = %q, want %s", client.Version(), protocolVersion100)
 	}
 }
 
