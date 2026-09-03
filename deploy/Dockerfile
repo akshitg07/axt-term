@@ -34,9 +34,10 @@ WORKDIR /src
 # Dependencies first: this layer is cached unless go.mod or go.sum changes, which
 # is most of the build time on a code-only edit.
 COPY backend/go.mod backend/go.sum* ./
-RUN go mod download
 
 COPY backend/ ./
+
+RUN go mod tidy && go mod download
 # .dockerignore keeps the committed placeholder dist/ out of the build context, so
 # this COPY is what satisfies the `//go:embed all:dist` directive -- without it the
 # backend does not compile at all.

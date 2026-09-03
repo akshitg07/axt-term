@@ -166,7 +166,7 @@ func (s *Server) Register(rt *httpx.Router) {
 	// what keeps these from colliding with /sessions/{id} above -- the same
 	// arrangement GET /sessions/recent already relies on.
 	perm(http.MethodDelete, "/api/v1/sessions/recent", rbac.SessionSSH, s.handleClearRecentSessions)
-	perm(http.MethodDelete, "/api/v1/sessions/recent/{id}", rbac.SessionSSH, s.handleDeleteRecentSession)
+	perm(http.MethodDelete, "/api/v1/recent-sessions/{id}", rbac.SessionSSH, s.handleDeleteRecentSession)
 	perm(http.MethodPost, "/api/v1/events/ticket", rbac.HostRead, s.handleEventsTicket)
 
 	// WebSockets are streaming routes: no request timeout, no body limit.
