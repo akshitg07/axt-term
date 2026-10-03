@@ -93,6 +93,7 @@ services:
     restart: unless-stopped
     networks:
       - internal
+      - edge
     security_opt:
       - no-new-privileges:true
     environment:
